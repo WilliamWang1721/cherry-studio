@@ -3,7 +3,7 @@ import './ThemeService'
 
 import { is } from '@electron-toolkit/utils'
 import { loggerService } from '@logger'
-import { isDev, isLinux, isMac, isWin } from '@main/constant'
+import { isLinux, isMac, isWin } from '@main/constant'
 import { getFilesDir } from '@main/utils/file'
 import { MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH } from '@shared/config/constant'
 import { IpcChannel } from '@shared/IpcChannel'
@@ -82,10 +82,12 @@ export class WindowService {
       ...(isLinux ? { icon } : {}),
       webPreferences: {
         preload: join(__dirname, '../preload/index.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
         sandbox: false,
         webSecurity: false,
+        allowRunningInsecureContent: false,
         webviewTag: true,
-        allowRunningInsecureContent: true,
         zoomFactor: configManager.getZoomFactor(),
         backgroundThrottling: false
       }
@@ -164,12 +166,15 @@ export class WindowService {
       contextMenu.contextMenu(webContents)
     })
 
-    // Dangerous API
-    if (isDev) {
-      mainWindow.webContents.on('will-attach-webview', (_, webPreferences) => {
-        webPreferences.preload = join(__dirname, '../preload/index.js')
-      })
-    }
+    mainWindow.webContents.on('will-attach-webview', (_, webPreferences) => {
+      // Never expose the app preload API surface to arbitrary <webview> content.
+      delete (webPreferences as any).preload
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
+      webPreferences.sandbox = true
+      webPreferences.webSecurity = true
+      webPreferences.allowRunningInsecureContent = false
+    })
   }
 
   private setupWindowEvents(mainWindow: BrowserWindow) {
@@ -284,7 +289,10 @@ export class WindowService {
           action: 'allow',
           overrideBrowserWindowOptions: {
             webPreferences: {
-              partition: 'persist:webview'
+              partition: 'persist:webview',
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true
             }
           }
         }
@@ -300,26 +308,6 @@ export class WindowService {
       }
 
       return { action: 'deny' }
-    })
-
-    this.setupWebRequestHeaders(mainWindow)
-  }
-
-  private setupWebRequestHeaders(mainWindow: BrowserWindow) {
-    mainWindow.webContents.session.webRequest.onHeadersReceived({ urls: ['*://*/*'] }, (details, callback) => {
-      if (details.responseHeaders?.['X-Frame-Options']) {
-        delete details.responseHeaders['X-Frame-Options']
-      }
-      if (details.responseHeaders?.['x-frame-options']) {
-        delete details.responseHeaders['x-frame-options']
-      }
-      if (details.responseHeaders?.['Content-Security-Policy']) {
-        delete details.responseHeaders['Content-Security-Policy']
-      }
-      if (details.responseHeaders?.['content-security-policy']) {
-        delete details.responseHeaders['content-security-policy']
-      }
-      callback({ cancel: false, responseHeaders: details.responseHeaders })
     })
   }
 
@@ -505,9 +493,12 @@ export class WindowService {
       fullscreenable: false,
       webPreferences: {
         preload: join(__dirname, '../preload/index.js'),
-        sandbox: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
         webSecurity: false,
-        webviewTag: true
+        allowRunningInsecureContent: false,
+        webviewTag: false
       }
     })
 

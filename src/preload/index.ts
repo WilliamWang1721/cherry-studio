@@ -35,7 +35,7 @@ import type {
   WebDavConfig
 } from '@types'
 import type { OpenDialogOptions } from 'electron'
-import { contextBridge, ipcRenderer, shell, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, safeStorage, shell, webUtils } from 'electron'
 import type { CreateDirectoryOptions } from 'webdav'
 
 import type {
@@ -137,9 +137,15 @@ const api = {
     decompress: (text: Buffer) => ipcRenderer.invoke(IpcChannel.Zip_Decompress, text)
   },
   backup: {
-    backup: (filename: string, content: string, path: string, skipBackupFile: boolean) =>
-      ipcRenderer.invoke(IpcChannel.Backup_Backup, filename, content, path, skipBackupFile),
-    restore: (path: string) => ipcRenderer.invoke(IpcChannel.Backup_Restore, path),
+    backup: (
+      filename: string,
+      content: string,
+      path: string,
+      skipBackupFile: boolean,
+      options?: { passphrase?: string }
+    ) => ipcRenderer.invoke(IpcChannel.Backup_Backup, filename, content, path, skipBackupFile, options),
+    restore: (path: string, options?: { passphrase?: string }) =>
+      ipcRenderer.invoke(IpcChannel.Backup_Restore, path, options),
     backupToWebdav: (data: string, webdavConfig: WebDavConfig) =>
       ipcRenderer.invoke(IpcChannel.Backup_BackupToWebdav, data, webdavConfig),
     restoreFromWebdav: (webdavConfig: WebDavConfig) =>
@@ -393,6 +399,38 @@ const api = {
   },
   shell: {
     openExternal: (url: string, options?: Electron.OpenExternalOptions) => shell.openExternal(url, options)
+  },
+  safeStorage: {
+    isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+    encryptString: (plainText: string) => {
+      if (!safeStorage.isEncryptionAvailable()) {
+        return plainText
+      }
+      if (plainText.startsWith('csenc:')) {
+        return plainText
+      }
+      try {
+        const encrypted = safeStorage.encryptString(plainText)
+        return `csenc:${encrypted.toString('base64')}`
+      } catch {
+        return plainText
+      }
+    },
+    decryptString: (value: string) => {
+      if (!safeStorage.isEncryptionAvailable()) {
+        return value
+      }
+      const prefix = 'csenc:'
+      if (!value.startsWith(prefix)) {
+        return value
+      }
+      try {
+        const payload = value.slice(prefix.length)
+        return safeStorage.decryptString(Buffer.from(payload, 'base64'))
+      } catch {
+        return value
+      }
+    }
   },
   copilot: {
     getAuthMessage: (headers?: Record<string, string>) =>

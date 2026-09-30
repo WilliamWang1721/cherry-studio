@@ -4,6 +4,7 @@ import type {
   OAuthClientInformationFull,
   OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js'
+import { safeStorage } from 'electron'
 import fs from 'fs/promises'
 import path from 'path'
 
@@ -23,16 +24,61 @@ export class JsonFileStorage implements IOAuthStorage {
     this.filePath = path.join(configDir, `${serverUrlHash}_oauth.json`)
   }
 
+  private async quarantineUnreadableFile(reason: string): Promise<void> {
+    try {
+      const timestamp = new Date().toISOString().replaceAll(':', '-')
+      const quarantinePath = `${this.filePath}.unreadable.${timestamp}`
+      await fs.rename(this.filePath, quarantinePath)
+      logger.warn(`OAuth storage was unreadable and has been quarantined (${reason})`, { quarantinePath })
+    } catch (error) {
+      logger.warn(`Failed to quarantine unreadable OAuth storage (${reason})`, error as Error)
+    }
+  }
+
   private async readStorage(): Promise<OAuthStorageData> {
     if (this.cache) {
       return this.cache
     }
 
     try {
-      const data = await fs.readFile(this.filePath, 'utf-8')
-      const parsed = JSON.parse(data)
-      const validated = OAuthStorageSchema.parse(parsed)
+      const raw = await fs.readFile(this.filePath)
+
+      const candidates: Array<{ source: 'encrypted' | 'plain'; payload: string }> = []
+      if (safeStorage.isEncryptionAvailable()) {
+        try {
+          candidates.push({ source: 'encrypted', payload: safeStorage.decryptString(raw) })
+        } catch {
+          // Decryption failure can happen when the OS keychain entry is unavailable (e.g., different OS user, reinstall).
+        }
+      }
+      candidates.push({ source: 'plain', payload: raw.toString('utf-8') })
+
+      let validated: OAuthStorageData | null = null
+      let usedEncryptedPayload = false
+      for (const candidate of candidates) {
+        try {
+          const parsed = JSON.parse(candidate.payload)
+          validated = OAuthStorageSchema.parse(parsed)
+          usedEncryptedPayload = candidate.source === 'encrypted'
+          break
+        } catch {
+          // Keep trying the next candidate.
+        }
+      }
+
+      if (!validated) {
+        await this.quarantineUnreadableFile('invalid_json_or_decryption_failed')
+        const initial: OAuthStorageData = { lastUpdated: Date.now() }
+        await this.writeStorage(initial)
+        return initial
+      }
+
       this.cache = validated
+
+      if (safeStorage.isEncryptionAvailable() && !usedEncryptedPayload) {
+        await this.writeStorage(validated)
+      }
+
       return validated
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
@@ -56,8 +102,20 @@ export class JsonFileStorage implements IOAuthStorage {
 
       // Write file atomically
       const tempPath = `${this.filePath}.tmp`
-      await fs.writeFile(tempPath, JSON.stringify(data, null, 2))
+      const payload = JSON.stringify(data, null, 2)
+      if (safeStorage.isEncryptionAvailable()) {
+        try {
+          await fs.writeFile(tempPath, safeStorage.encryptString(payload))
+        } catch (error) {
+          logger.warn('safeStorage encryptString failed; saving MCP OAuth storage as plain JSON', error as Error)
+          await fs.writeFile(tempPath, payload)
+        }
+      } else {
+        logger.warn('safeStorage encryption is not available; saving MCP OAuth storage as plain JSON')
+        await fs.writeFile(tempPath, payload)
+      }
       await fs.rename(tempPath, this.filePath)
+      await fs.chmod(this.filePath, 0o600)
 
       // Update cache
       this.cache = data

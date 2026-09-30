@@ -1,10 +1,23 @@
 import { loggerService } from '@logger'
 import { combineReducers, configureStore } from '@reduxjs/toolkit'
 import { useDispatch, useSelector, useStore } from 'react-redux'
-import { FLUSH, PAUSE, PERSIST, persistReducer, persistStore, PURGE, REGISTER, REHYDRATE } from 'redux-persist'
+import {
+  createTransform,
+  FLUSH,
+  PAUSE,
+  PERSIST,
+  persistReducer,
+  persistStore,
+  PURGE,
+  REGISTER,
+  REHYDRATE
+} from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 
 import storeSyncService from '../services/StoreSyncService'
+import { decryptPersistSliceState, encryptPersistSliceState, SECURE_PERSIST_SLICE_KEYS } from '../utils/securePersist'
+import type { CredentialIssue } from '../utils/secureStorage'
+import { consumeCredentialIssues, CREDENTIAL_ISSUE_EVENT_NAME } from '../utils/secureStorage'
 import assistants from './assistants'
 import backup from './backup'
 import codeTools from './codeTools'
@@ -24,7 +37,7 @@ import nutstore from './nutstore'
 import ocr from './ocr'
 import paintings from './paintings'
 import preprocess from './preprocess'
-import runtime from './runtime'
+import runtime, { addCredentialIssue, setCredentialIssues } from './runtime'
 import selectionStore from './selectionStore'
 import settings from './settings'
 import shortcuts from './shortcuts'
@@ -34,6 +47,15 @@ import translate from './translate'
 import websearch from './websearch'
 
 const logger = loggerService.withContext('Store')
+let credentialIssueListenerAttached = false
+
+const securePersistTransform = createTransform(
+  (inboundState: any, key) => encryptPersistSliceState(String(key), inboundState),
+  (outboundState: any, key) => decryptPersistSliceState(String(key), outboundState),
+  {
+    whitelist: [...SECURE_PERSIST_SLICE_KEYS]
+  }
+)
 
 const rootReducer = combineReducers({
   assistants,
@@ -69,9 +91,10 @@ const persistedReducer = persistReducer(
     storage,
     version: 186,
     blacklist: ['runtime', 'messages', 'messageBlocks', 'tabs', 'toolPermissions'],
+    transforms: [securePersistTransform],
     migrate
   },
-  rootReducer
+  rootReducer as any
 )
 
 /**
@@ -119,6 +142,36 @@ export const persistor = persistStore(store, undefined, () => {
         logger.error('Failed to initialize notes path on startup:', error as Error)
       }
     }, 0)
+  }
+
+  // Proactively flush once after rehydration so secrets are re-persisted in encrypted form.
+  // This is best-effort and should never block app startup.
+  const pathname = window.location?.pathname || ''
+  const isMainWindow = pathname === '/' || pathname.endsWith('/index.html') || pathname.endsWith('index.html')
+  if (isMainWindow && window.api?.safeStorage?.isEncryptionAvailable?.()) {
+    setTimeout(() => {
+      persistor.flush().catch(() => {})
+    }, 0)
+  }
+
+  const issues = consumeCredentialIssues()
+  if (issues.length > 0) {
+    store.dispatch(setCredentialIssues(issues))
+  }
+
+  if (
+    !credentialIssueListenerAttached &&
+    typeof window !== 'undefined' &&
+    typeof window.addEventListener === 'function'
+  ) {
+    credentialIssueListenerAttached = true
+    window.addEventListener(CREDENTIAL_ISSUE_EVENT_NAME, ((event: Event) => {
+      const issue = (event as CustomEvent).detail as CredentialIssue | undefined
+      if (!issue || typeof issue.id !== 'string' || typeof issue.reason !== 'string') {
+        return
+      }
+      store.dispatch(addCredentialIssue(issue))
+    }) as EventListener)
   }
 })
 

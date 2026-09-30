@@ -4,13 +4,14 @@ import { createRequire } from 'node:module'
 import { styleSheetSerializer } from 'jest-styled-components/serializer'
 import { expect, vi } from 'vitest'
 
+expect.addSnapshotSerializer(styleSheetSerializer)
+
+// Node.js >= 25 removed `buffer.SlowBuffer`, but some transitive deps still assume it exists.
 const require = createRequire(import.meta.url)
 const bufferModule = require('buffer')
 if (!bufferModule.SlowBuffer) {
   bufferModule.SlowBuffer = bufferModule.Buffer
 }
-
-expect.addSnapshotSerializer(styleSheetSerializer)
 
 // Mock LoggerService globally for renderer tests
 vi.mock('@logger', async () => {
@@ -56,28 +57,31 @@ vi.stubGlobal('api', {
   }
 })
 
-if (typeof globalThis.localStorage === 'undefined' || typeof (globalThis.localStorage as any).getItem !== 'function') {
-  let store = new Map<string, string>()
-
-  const localStorageMock = {
-    getItem: (key: string) => store.get(key) ?? null,
+// Node.js >= 25 exposes a non-standard `localStorage`/`sessionStorage` global by default.
+// In jsdom tests we want the standard Web Storage API from the jsdom window.
+const createStorageMock = () => {
+  const data = new Map<string, string>()
+  return {
+    getItem: (key: string) => data.get(key) ?? null,
     setItem: (key: string, value: string) => {
-      store.set(key, String(value))
+      data.set(key, String(value))
     },
     removeItem: (key: string) => {
-      store.delete(key)
+      data.delete(key)
     },
     clear: () => {
-      store.clear()
+      data.clear()
     },
-    key: (index: number) => Array.from(store.keys())[index] ?? null,
+    key: (index: number) => Array.from(data.keys())[index] ?? null,
     get length() {
-      return store.size
+      return data.size
     }
   }
-
-  vi.stubGlobal('localStorage', localStorageMock)
-  if (typeof window !== 'undefined') {
-    Object.defineProperty(window, 'localStorage', { value: localStorageMock })
-  }
 }
+
+const localStorageImpl = typeof window?.localStorage?.getItem === 'function' ? window.localStorage : createStorageMock()
+vi.stubGlobal('localStorage', localStorageImpl)
+
+const sessionStorageImpl =
+  typeof window?.sessionStorage?.getItem === 'function' ? window.sessionStorage : createStorageMock()
+vi.stubGlobal('sessionStorage', sessionStorageImpl)
